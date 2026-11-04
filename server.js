@@ -12,8 +12,10 @@ const AUTH_DIR = process.env.AUTH_DIR || './auth';   // Railway: volume mount ka
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const TRIGGER = /please choose from any of the options/i;
 const OPTION = /get\s*mini\s*statement/i;
+const WAIT = /please wait while we fetch/i;
+const JOB_FILE = AUTH_DIR + '/job.json';
 
-const state = { status: 'connecting', qr: null, pairCode: null, me: null, job: null, result: null, logs: [] };
+const state = { status: 'connecting', qr: null, pairCode: null, me: null, job: null, results: [], logs: [] };
 let sock = null, timer = null;
 const clients = new Set();
 
@@ -31,6 +33,7 @@ async function start() {
     if (connection === 'open') {
       state.status = 'open'; state.qr = null; state.pairCode = null;
       state.me = sock.user?.id?.split(':')[0].split('@')[0]; log('WhatsApp connected: +' + state.me);
+      if (!state.job && fs.existsSync(JOB_FILE)) { try { state.job = { ...JSON.parse(fs.readFileSync(JOB_FILE, 'utf8')), runs: 0 }; log('Saved job resumed'); runCycle(); } catch {} }
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
@@ -104,8 +107,10 @@ async function onMessage(msg) {
       job.stage = 'waiting_result';
     } catch (e) { job.stage = 'error'; log('Click failed: ' + e.message); }
   } else {
-    state.result = { at: new Date().toISOString(), text: text || '(media/unsupported message)' };
-    job.stage = 'done'; log('Result received');
+    if (WAIT.test(text) || TRIGGER.test(text)) { log('Interim message ignored, waiting for statement...'); return; }
+    state.results.unshift({ at: new Date().toISOString(), run: job.runs, text: text || '(media/unsupported message)' });
+    state.results = state.results.slice(0, 20);
+    job.stage = 'done'; log('Statement received (run #' + job.runs + ')');
   }
   push();
 }
@@ -135,27 +140,41 @@ app.post('/api/pair', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/schedule', guard, (req, res) => {
+function saveJob() {
+  const { target, text, intervalMin } = state.job;
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  fs.writeFileSync(JOB_FILE, JSON.stringify({ target, text, intervalMin }));
+}
+
+// one full chain: send message -> menu -> click -> statement. Repeats every intervalMin.
+function runCycle() {
+  const job = state.job; if (!job) return;
+  clearTimeout(timer);
+  const ms = job.intervalMin * 60000;
+  job.nextAt = new Date(Date.now() + ms).toISOString();
+  timer = setTimeout(runCycle, ms);
+  if (state.status !== 'open') { log('WhatsApp offline, run skipped'); return push(); }
+  job.runs++; job.stage = 'sending';
+  sock.sendMessage(job.target + '@s.whatsapp.net', { text: job.text })
+    .then(() => { if (state.job === job) { job.stage = 'waiting_menu'; log('Run #' + job.runs + ': message sent'); } push(); })
+    .catch(e => { job.stage = 'error'; log('Send failed: ' + e.message); push(); });
+  push();
+}
+
+app.post('/api/start', guard, (req, res) => {
   if (state.status !== 'open') return res.status(400).json({ error: 'Pehle WhatsApp link karo' });
   const target = String(req.body.target || '').replace(/\D/g, '');
   const text = String(req.body.text || '').trim();
-  const at = req.body.at ? new Date(req.body.at) : new Date();
-  if (!target || !text || isNaN(at)) return res.status(400).json({ error: 'Number, message aur time sahi daalo' });
-  const delay = Math.max(0, at - Date.now());
-  clearTimeout(timer); state.result = null;
-  state.job = { target, text, at: at.toISOString(), stage: 'scheduled' };
-  log(`Scheduled for ${at.toISOString()} -> +${target}`);
-  timer = setTimeout(async () => {
-    try {
-      await sock.sendMessage(target + '@s.whatsapp.net', { text });
-      state.job.stage = 'waiting_menu'; log('Message sent, waiting for menu...');
-    } catch (e) { state.job.stage = 'error'; log('Send failed: ' + e.message); }
-    push();
-  }, delay);
-  push(); res.json({ ok: true });
+  const intervalMin = Number(req.body.intervalMin);
+  if (!target || !text || !(intervalMin >= 1)) return res.status(400).json({ error: 'Number, message aur interval (min 1 minute) sahi daalo' });
+  state.job = { target, text, intervalMin, runs: 0, stage: 'sending', nextAt: null };
+  saveJob(); log(`Started: +${target}, every ${intervalMin} min`);
+  runCycle(); res.json({ ok: true });
 });
 
-app.post('/api/cancel', guard, (_req, res) => { clearTimeout(timer); state.job = null; log('Job cancelled'); res.json({ ok: true }); });
+app.post('/api/stop', guard, (_req, res) => {
+  clearTimeout(timer); state.job = null; fs.rmSync(JOB_FILE, { force: true }); log('Stopped'); push(); res.json({ ok: true });
+});
 
 app.post('/api/logout', guard, async (_req, res) => { try { await sock.logout(); } catch {} res.json({ ok: true }); });
 
