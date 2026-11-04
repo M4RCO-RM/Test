@@ -33,32 +33,32 @@ pre{white-space:pre-wrap;word-break:break-word;margin:0;font:inherit}.result{bor
  <div id="meBox" class="hide">Linked: <b id="me"></b> <button class="ghost" onclick="api('logout')">Unlink</button></div>
 </section>
 
-<section><h2>2. Schedule</h2>
+<section><h2>2. Repeat settings</h2>
  <label>Target number</label><input id="target" placeholder="91XXXXXXXXXX">
  <label>Message to send</label><textarea id="text" rows="2">Hi</textarea>
- <label>Send at (blank = abhi)</label><input id="at" type="datetime-local" step="1">
- <button onclick="schedule()">Schedule</button><button class="ghost" onclick="api('cancel')">Cancel</button>
+ <label>Repeat every (minutes)</label><input id="interval" type="number" min="1" value="10">
+ <button onclick="start()">Start</button><button class="ghost" onclick="api('stop')">Stop</button>
 </section>
 
 <section><h2>3. Status <span id="stage" class="pill">idle</span></h2>
- <div id="result" class="hide result"><b>Statement message:</b><pre id="resText"></pre></div>
+ <div id="results"></div>
  <div id="logs" class="log"></div>
 </section></main>
 <script>
 let pass=sessionStorage.getItem('pw')||'';const $=id=>document.getElementById(id);
-const labels={scheduled:'Scheduled',waiting_menu:'Waiting for menu',waiting_result:'Waiting for statement',done:'Done',error:'Error'};
+const labels={sending:'Sending',waiting_menu:'Waiting for menu',waiting_result:'Waiting for statement',done:'Done',error:'Error'};
 async function api(p,body){const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json','x-pass':pass},body:JSON.stringify(body||{})});
  const d=await r.json();if(r.status===401){$('login').classList.remove('hide')}else if(d.error)alert(d.error);return d}
 function savePw(){pass=$('pw').value;sessionStorage.setItem('pw',pass);$('login').classList.add('hide');connect()}
 function pair(){api('pair',{phone:$('phone').value})}
-function schedule(){const a=$('at').value;api('schedule',{target:$('target').value,text:$('text').value,at:a?new Date(a).toISOString():''})}
+function start(){api('start',{target:$('target').value,text:$('text').value,intervalMin:$('interval').value})}
 function render(s){
  $('st').textContent=s.status;const open=s.status==='open';
  $('linkBox').classList.toggle('hide',open);$('meBox').classList.toggle('hide',!open);$('me').textContent='+'+(s.me||'');
  $('qrBox').innerHTML=s.qr?'<img alt="QR" src="'+s.qr+'" width="220" height="220">':'';
  $('code').textContent=s.pairCode||'';
- $('stage').textContent=s.job?(labels[s.job.stage]||s.job.stage)+' · '+new Date(s.job.at).toLocaleString():'idle';
- $('result').classList.toggle('hide',!s.result);if(s.result)$('resText').textContent=s.result.text;
+ $('stage').textContent=s.job?(labels[s.job.stage]||s.job.stage)+' · run '+s.job.runs+(s.job.nextAt?' · next '+new Date(s.job.nextAt).toLocaleTimeString():''):'idle';
+ $('results').innerHTML=s.results.map(r=>'<div class="result" style="margin-bottom:12px"><small style="color:var(--mute)">Run #'+r.run+' · '+new Date(r.at).toLocaleString()+'</small><pre>'+r.text.replace(/</g,'&lt;')+'</pre></div>').join('');
  $('logs').innerHTML=s.logs.slice().reverse().map(l=>'<div>'+new Date(l.t).toLocaleTimeString()+' '+l.m.replace(/</g,'&lt;')+'</div>').join('')}
 let es;function connect(){if(es)es.close();es=new EventSource('/api/events?p='+encodeURIComponent(pass));
  es.onmessage=e=>render(JSON.parse(e.data));es.onerror=()=>{if(es.readyState===2)$('login').classList.remove('hide')}}
